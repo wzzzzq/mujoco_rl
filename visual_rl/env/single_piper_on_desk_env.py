@@ -330,7 +330,7 @@ class PiperEnv(gym.Env):
     def _compute_pos_error_and_reward(self, cur_pos, goal_pos):
         # 计算位置误差(欧氏距离)
         pos_error = np.linalg.norm(cur_pos - goal_pos) # 计算当前末端执行器位置与目标位置之间的欧氏距离误差
-        pos_reward = -np.arctan(pos_error) # 使用反正切函数对位置误差进行非线性变换，并取负数，这是一个密集奖励函数，距离越小, reward 越接近 0(即越好); 距离越大, reward 趋近于 -π/2 ≈ -1.57(即越差)
+        pos_reward = -2 * pos_error + 0.8
         return pos_reward, pos_error
     
 
@@ -359,20 +359,16 @@ class PiperEnv(gym.Env):
             table_penalty = -0.5*min(table_force / 10.0, 2.0)  # 负惩罚，限制最大惩罚为 -1.0
             reward_components['table_penalty'] = table_penalty
             
-        # 检查夹爪与苹果的接触 - 奖励接触苹果
         apple_contact, apple_force = self._check_gripper_contact_with_object('apple')
         if apple_contact:
-            # 奖励与苹果接触，接触力适中时奖励更高
-            contact_reward = 5*min(apple_force / 5.0, 1.0)  # 最大奖励 5
-            reward_components['contact_reward'] = contact_reward
+            reward_components['contact_reward'] = 10
             
-            # 如果有接触且距离很近，可以考虑成功
             if pos_err < 0.03:  # 3cm 阈值更严格
                 self.goal_reached = True
                 reward_components['success_bonus'] = 20.0  # 接触成功的高奖励
-        elif pos_err < 0.05:  # 如果没有接触但距离很近，也给予一定奖励
+        elif pos_err < 0.1:  # 如果没有接触但距离很近，也给予一定奖励
             reward_components['proximity_bonus'] = 5.0
-        elif pos_err > 0.2:
+        elif pos_err > 0.4:
             # 如果距离过远，给予负奖励
             reward_components['proximity_bonus'] = -2.0
         # 存储奖励组件供step函数使用
