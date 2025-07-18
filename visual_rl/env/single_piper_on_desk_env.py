@@ -148,56 +148,6 @@ class PiperEnv(gym.Env):
         
         return position, quaternion
 
-
-    # def _set_goal_pose(self):
-    #     while True: # 循环直到找到一个合法的目标位姿为止
-    #         joints = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"] # piper xml 里定义的 6 个关节角名字
-    #         angles = [] # 通过随机在关节空间内采样得到的目标关节角
-
-    #         # 随机在关节空间采样
-    #         for joint_name in joints:
-    #             joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, joint_name) # 根据关节名获取其在 MuJoCo 模型中的 ID
-                
-    #             if joint_id == -1:
-    #                 raise ValueError(f"Joint named '{joint_name}' not found in the model.")
-                
-    #             # 如果关节有定义限位(jnt_limited == True)，则使用 XML 中设定的范围，否则，默认使用 [-pi, pi] 的范围
-    #             low_limit = self.model.jnt_range[joint_id, 0] if self.model.jnt_limited[joint_id] else -np.pi
-    #             high_limit = self.model.jnt_range[joint_id, 1] if self.model.jnt_limited[joint_id] else np.pi
-    #             random_angle = np.random.uniform(low_limit, high_limit) # 在该关节范围内随机采样一个角度值
-    #             angles.append(random_angle) # 将关节角添加到列表
-
-    #         angles = np.array(angles) # 将列表转换为 NumPy 数组
-    #         ori_qpos = self.data.qpos[:6].copy() # 保存当前的前 6 个关节角度，便于后续恢复原始状态
-
-    #         self.data.qpos[:6] = angles # 将随机采样的角度写入 qpos
-    #         # 调用 mj_forward 和 mj_step 让模型更新状态
-    #         mujoco.mj_forward(self.model, self.data)
-    #         mujoco.mj_step(self.model, self.data)
-    #         goal_pos, goal_quat = self._get_site_pos_ori("end_ee") # 获取此时末端执行器的位置和姿态
-
-    #         # 恢复原来的关节角度，防止影响后续逻辑
-    #         self.data.qpos[:6] = ori_qpos 
-    #         mujoco.mj_forward(self.model, self.data)
-    #         mujoco.mj_step(self.model, self.data)
-
-    #         x_goal, y_goal, z_goal = goal_pos[0], goal_pos[1], goal_pos[2] # 解析出目标位置的 x、y、z 坐标
-
-
-    #         if (self.workspace_limits['x'][0] <= x_goal <= self.workspace_limits['x'][1] and
-    #             self.workspace_limits['y'][0] <= y_goal <= self.workspace_limits['y'][1] and
-    #             self.workspace_limits['z'][0] <= z_goal <= self.workspace_limits['z'][1]): # 判断目标点是否在预设的工作空间范围内
-
-    #             goal_position = np.array([x_goal, y_goal, z_goal])
-    #             self._label_goal_pose(goal_position, goal_quat) # 如果在范围内，则调用 _label_goal_pose(...) 函数，将目标物体(如 "target")移动到该位置和姿态
-
-    #             # 保存目标位置、姿态和对应的关节角度，并退出循环
-    #             self.goal_pos = goal_position
-    #             self.goal_quat = goal_quat
-    #             self.goal_angle = angles
-    #             return
-    
-
     # 将强化学习 agent 输出的动作值 action 从 [-1, 1] 范围映射到实际的关节角度范围
     def map_action_to_joint_limits(self, action: np.ndarray) -> np.ndarray:
         """
@@ -243,6 +193,7 @@ class PiperEnv(gym.Env):
         # self._set_goal_pose()
 
         ## TODO step 2 : 把交互的物品重新放置位置
+        self._reset_object_pose()
         
         # 加入扰动，使得在每次 reset 时将物体放在略微不同的位置，提高训练鲁棒性
         obs = self._get_observation() # 获取初始观测值
@@ -253,6 +204,20 @@ class PiperEnv(gym.Env):
 
         return obs, {}
     
+    def _reset_object_pose(self):
+ 
+        apple_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'apple')
+        
+        # 获取苹果对应的关节信息
+        apple_joint_id = self.model.body_jntadr[apple_id]
+        apple_qposadr = self.model.jnt_qposadr[apple_joint_id]
+        
+        # 定义苹果的初始位置范围 (在桌面上的合理范围)
+        base_pos = np.array([0.02, 0.27, 0.768])  # 初始位置
+
+        self.data.qpos[apple_qposadr:apple_qposadr + 3] = base_pos # 设置苹果的初始位置
+        self.data.qpos[apple_qposadr + 3:apple_qposadr + 7] = [0, 0, 0, 0]
+
     # 从 MuJoCo 中的某个指定名称的相机(camera)渲染图像，并返回一个 NumPy 数组形式的 OpenCV 图像(BGR 格式)
     def _get_image_from_camera(self, w, h, camera_name):
         viewport = mujoco.MjrRect(0, 0, w, h) # 定义了一个矩形区域，用于渲染图像，(0, 0, w, h) 表示从左上角 (0, 0) 开始，宽 w，高 h
@@ -282,6 +247,86 @@ class PiperEnv(gym.Env):
         return obs
     
 
+    def _check_contact_between_bodies(self, body1_name: str, body2_name: str) -> tuple[bool, float]:
+        """
+        检查两个 body 之间是否有接触，并返回接触力的大小
+        Args:
+            body1_name: 第一个body的名称
+            body2_name: 第二个body的名称
+        Returns:
+            tuple: (是否接触, 接触力大小)
+        """
+        # 获取 body ID
+        body1_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, body1_name)
+        body2_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, body2_name)
+        
+        if body1_id == -1 or body2_id == -1:
+            return False, 0.0
+            
+        # 遍历所有接触点
+        total_force = 0.0
+        contact_found = False
+        
+        for i in range(self.data.ncon):
+            contact = self.data.contact[i]
+            
+            # 获取接触的两个 geom
+            geom1_id = contact.geom1
+            geom2_id = contact.geom2
+            
+            # 获取这些 geom 所属的 body
+            geom1_body = self.model.geom_bodyid[geom1_id]
+            geom2_body = self.model.geom_bodyid[geom2_id]
+            
+            # 检查是否是我们感兴趣的两个 body 之间的接触
+            if ((geom1_body == body1_id and geom2_body == body2_id) or 
+                (geom1_body == body2_id and geom2_body == body1_id)):
+                contact_found = True
+                
+                # 计算接触力大小 (法向力)
+                contact_force = np.zeros(6)
+                mujoco.mj_contactForce(self.model, self.data, i, contact_force)
+                force_magnitude = np.linalg.norm(contact_force[:3])  # 只考虑法向力
+                total_force += force_magnitude
+                
+        return contact_found, total_force
+
+    def _check_gripper_contact_with_object(self, object_name: str) -> tuple[bool, float]:
+        """
+        检查夹爪(包括两个手指)是否与指定物体接触
+        Args:
+            object_name: 物体名称
+        Returns:
+            tuple: (是否接触, 总接触力)
+        """
+        # 检查两个手指是否与物体接触
+        finger1_contact, finger1_force = self._check_contact_between_bodies("link7", object_name)
+        finger2_contact, finger2_force = self._check_contact_between_bodies("link8", object_name)
+        
+        # 任一手指接触即认为夹爪接触
+        gripper_contact = finger1_contact or finger2_contact
+        total_force = finger1_force + finger2_force
+        
+        return gripper_contact, total_force
+
+    def _check_gripper_contact_with_table(self) -> tuple[bool, float]:
+        """
+        检查夹爪是否与桌面接触
+        Returns:
+            tuple: (是否接触, 总接触力)
+        """
+        # 检查夹爪各部分与桌面的接触
+        # link6 是末端执行器主体
+        link6_contact, link6_force = self._check_contact_between_bodies("link6", "desk")
+        finger1_contact, finger1_force = self._check_contact_between_bodies("link7", "desk")
+        finger2_contact, finger2_force = self._check_contact_between_bodies("link8", "desk")
+        
+        # 任何部分接触即认为夹爪接触桌面
+        table_contact = link6_contact or finger1_contact or finger2_contact
+        total_force = link6_force + finger1_force + finger2_force
+        
+        return table_contact, total_force
+
     def _compute_pos_error_and_reward(self, cur_pos, goal_pos):
         # 计算位置误差(欧氏距离)
         pos_error = np.linalg.norm(cur_pos - goal_pos) # 计算当前末端执行器位置与目标位置之间的欧氏距离误差
@@ -289,117 +334,79 @@ class PiperEnv(gym.Env):
         return pos_reward, pos_error
     
 
-    # def _compute_ori_error_and_reward(self, cur_quat, goal_quat, axis_weight=None, use_arctan=True):
-    #     """
-    #     Compute orientation reward based on quaternion difference.
-
-    #     Args:
-    #         cur_quat (np.array): current orientation [w, x, y, z]
-    #         goal_quat (np.array): goal orientation [w, x, y, z]
-    #         axis_weight (np.array or None): weights for [rx, ry, rz] axes
-    #         use_arctan (bool): whether to apply arctangent smoothing to reward
-
-    #     Returns:
-    #         float: orientation reward (the more negative, the worse the orientation mismatch)
-    #     """
-
-    #     # Convert to scipy Rotation objects
-    #     r_current = Rotation.from_quat([cur_quat[1], cur_quat[2], cur_quat[3], cur_quat[0]]) # x,y,z,w
-    #     r_goal = Rotation.from_quat([goal_quat[1], goal_quat[2], goal_quat[3], goal_quat[0]]) # x,y,z,w
-
-    #     # 计算相对旋转(姿态差) ∈ [0, π]
-    #     r_diff = r_goal * r_current.inv()
-
-    #     # Convert to rotation vector ∈ [[-π, π], [-π, π], [-π, π]]
-    #     rotvec = r_diff.as_rotvec() # shape (3,), angle * axis
-
-    #     if axis_weight is None:
-    #         # Default: equal weights
-    #         axis_weight = np.array([1.0, 1.0, 1.0])
-
-    #     # weighted_error ∈ [0, π ⋅ 1.732]
-    #     weighted_error = np.sum(axis_weight * np.abs(rotvec))
-
-    #     # Optional: apply arctan smoothing
-    #     if use_arctan:
-    #         # orientation_reward ∈ [-1.387, 0]
-    #         orientation_reward = -np.arctan(weighted_error)
-    #     else:
-    #         # orientation_reward ∈ [-π ⋅ 1.732, 0]
-    #         orientation_reward = -weighted_error
-
-    #     return orientation_reward, weighted_error
-    
-
     def _compute_reward(self, observation):
-        # TODO
         # 获取当前末端执行器位姿
         end_ee_position, _ = self._get_site_pos_ori("end_ee")
         # 获取目标物体位姿
         apple_position, _ = self._get_body_pose('apple')
         # 末端执行器位姿和目标物体位姿的差异作为奖励
-        reward, _ = self._compute_pos_error_and_reward(end_ee_position, apple_position)
-        return reward
-        # # 提取当前末端 pose
-        # cur_gripper_pos = observation[:3].copy()
-        # cur_gripper_quat = observation[3:7].copy()
-
-        # # 目标 pose
-        # goal_pos = self.goal_pos.copy()
-        # goal_quat = self.goal_quat.copy()
-
-        # # 计算位置误差与位置reward
-        # pos_reward, pos_error = self._compute_pos_error_and_reward(cur_gripper_pos, goal_pos)
-        # # 计算姿态误差 reward
-        # ori_reward, ori_error = self._compute_ori_error_and_reward(cur_gripper_quat, goal_quat)
-
-        # # 综合奖励，给各个reward设置权重
-        # w_pos =  2.0
-        # w_ori = 0.2
-        # reward = w_pos * pos_reward + w_ori * ori_reward
-
-        # # 达到目标阈值时，增加精细奖励
-        # pos_thresh = 0.1  # 10 cm
-        # ori_thresh = 1.047
-        # # 精细奖励的有效范围
-        # pos_range = 0.1     # 10 cm
-        # ori_range = 1.047   # 60° 
-
-        # success_pos_thresh = 0.05   # 5 cm
-        # success_ori_thresh = 0.2   # 11.5°
-
-        # if pos_error < pos_thresh and ori_error < ori_thresh:
-
-        #     pos_fine_reward = 1.0 - np.tanh(pos_error / pos_range)
-        #     ori_fine_reward = 1.0 - np.tanh(ori_error / ori_range)
+        base_reward, pos_err = self._compute_pos_error_and_reward(end_ee_position, apple_position)
+        
+        # 初始化奖励组件
+        reward_components = {
+            'base_reward': base_reward,
+            'table_penalty': 0.0,
+            'contact_reward': 0.0,
+            'success_bonus': 0.0,
+            'proximity_bonus': 0.0,
+            'position_error': pos_err
+        }
+        
+        # 检查夹爪与桌面的接触 - 惩罚接触桌面
+        table_contact, table_force = self._check_gripper_contact_with_table()
+        if table_contact:
+            # 惩罚与桌面接触，力越大惩罚越重
+            table_penalty = -0.5*min(table_force / 10.0, 2.0)  # 负惩罚，限制最大惩罚为 -1.0
+            reward_components['table_penalty'] = table_penalty
             
-
-        #     # 位置误差已经较小的时候, 优先奖励旋转
-        #     w_fine_pos = 1.0
-        #     w_fine_ori = 1.0
-
-        #     fine_reward = w_fine_pos * pos_fine_reward + w_fine_ori * ori_fine_reward
-        #     reward += fine_reward
-        #     # 认为基本上已经完美到达目标, 再增加一部分奖励
-        #     if pos_error < success_pos_thresh and ori_error < success_ori_thresh:
-        #         self.goal_reached = True
-        #         reward += 10.0 
-        # return reward
+        # 检查夹爪与苹果的接触 - 奖励接触苹果
+        apple_contact, apple_force = self._check_gripper_contact_with_object('apple')
+        if apple_contact:
+            # 奖励与苹果接触，接触力适中时奖励更高
+            contact_reward = 5*min(apple_force / 5.0, 1.0)  # 最大奖励 5
+            reward_components['contact_reward'] = contact_reward
+            
+            # 如果有接触且距离很近，可以考虑成功
+            if pos_err < 0.03:  # 3cm 阈值更严格
+                self.goal_reached = True
+                reward_components['success_bonus'] = 20.0  # 接触成功的高奖励
+        elif pos_err < 0.05:  # 如果没有接触但距离很近，也给予一定奖励
+            reward_components['proximity_bonus'] = 5.0
+        elif pos_err > 0.2:
+            # 如果距离过远，给予负奖励
+            reward_components['proximity_bonus'] = -2.0
+        # 存储奖励组件供step函数使用
+        self.reward_components = reward_components
+        
+        # 计算总奖励
+        total_reward = sum(reward_components.values()) - reward_components['position_error']  # position_error不计入总和
+        return total_reward
+        
 
     # 接收一个动作 action，执行一步环境逻辑，并返回观测值、奖励、终止信号等信息
     def step(self, action):
         mapped_action = self.map_action_to_joint_limits(action) # 将 action 映射回真实机械臂关节空间
-        self.data.qpos[:7] = mapped_action[:7] # 动作
+        # TODO: Use delta or action?
+        self.data.ctrl[:7] = mapped_action[:7] # 动作
         # self._label_goal_pose(self.goal_pos, self.goal_quat)
-        mujoco.mj_step(self.model, self.data) # mujoco 仿真向前推进一步，此处会做动力学积分，更新所有物理状态(位置、速度、接触力等)
+        # TODO: One sample should last longer
+        for i in range(100):
+            mujoco.mj_step(self.model, self.data) # mujoco 仿真向前推进一步，此处会做动力学积分，更新所有物理状态(位置、速度、接触力等)
 
         self.step_number += 1 # 更新步数计数器
         observation = self._get_observation() # 获取当前状态观测值
-        is_finite = False # 检查是否出现 NaN/inf，目前硬编码为 False
 
         reward = self._compute_reward(observation) # 计算 reward
-        done = not is_finite or self.goal_reached # self.goal_reached 是标志变量，表示是否完成任务(比如抓取成功)
-        info = {'is_success': done} 
+        done = self.goal_reached
+        
+        # 创建详细的info字典，包含奖励组件信息
+        info = {
+            'is_success': done,
+            'reward_components': self.reward_components.copy() if hasattr(self, 'reward_components') else {},
+            'total_reward': reward,
+            'step_number': self.step_number,
+            'goal_reached': self.goal_reached
+        } 
 
         truncated = self.step_number > self.episode_len # 如果当前步数超过了预设的最大步数，则 episode 被截断，通常表示未完成任务但时间到了。
         
@@ -448,7 +455,7 @@ if __name__ == "__main__":
         policy_kwargs=policy_kwargs,
         verbose=1,
         n_steps=10,
-        batch_size=500,
+        batch_size=50,
         n_epochs=10,
         gamma=0.99,
         learning_rate=3e-4,
@@ -461,7 +468,7 @@ if __name__ == "__main__":
     total_timesteps          总共与环境交互的步数 (env.step() 的次数总和）   
     progress_bar             是否显示训练进度条
     """
-    model.learn(total_timesteps=2000*10000, progress_bar=True)
+    model.learn(total_timesteps=200000, progress_bar=True)  # Changed from 20M to 100K steps
     model.save("piper_ik_ppo_model")
 
     print(" model sava success ! ")
