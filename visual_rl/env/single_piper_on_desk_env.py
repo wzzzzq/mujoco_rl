@@ -316,16 +316,18 @@ class PiperEnv(gym.Env):
             tuple: (是否接触, 总接触力)
         """
         # 检查夹爪各部分与桌面的接触
-        # link6 是末端执行器主体
-        link6_contact, link6_force = self._check_contact_between_bodies("link6", "desk")
-        finger1_contact, finger1_force = self._check_contact_between_bodies("link7", "desk")
-        finger2_contact, finger2_force = self._check_contact_between_bodies("link8", "desk")
-        
-        # 任何部分接触即认为夹爪接触桌面
-        table_contact = link6_contact or finger1_contact or finger2_contact
-        total_force = link6_force + finger1_force + finger2_force
-        
-        return table_contact, total_force
+        for i in range(1,9,1):
+            link_name = f"link{i}"
+            link_contact, link_force = self._check_contact_between_bodies(link_name, "desk")
+            total_force = 0.0
+            contact_found = False
+            if link_contact:
+                # 如果任一部分接触，记录接触信息
+                contact_found = True
+                print(f"夹爪与桌面接触: {link_name} 接触力 {link_force}")
+                total_force += link_force
+
+        return contact_found, total_force
 
     def _compute_pos_error_and_reward(self, cur_pos, goal_pos):
         # 计算位置误差(欧氏距离)
@@ -356,7 +358,7 @@ class PiperEnv(gym.Env):
         table_contact, table_force = self._check_gripper_contact_with_table()
         if table_contact:
             # 惩罚与桌面接触，力越大惩罚越重
-            table_penalty = -0.5*min(table_force / 10.0, 2.0)  # 负惩罚，限制最大惩罚为 -1.0
+            table_penalty = -2*min(table_force / 10.0, 2.0)  # 负惩罚，限制最大惩罚为 -2.0
             reward_components['table_penalty'] = table_penalty
             
         # 检查夹爪与苹果的接触 - 奖励接触苹果
@@ -367,7 +369,7 @@ class PiperEnv(gym.Env):
             reward_components['contact_reward'] = contact_reward
             
             # 如果有接触且距离很近，可以考虑成功
-            if pos_err < 0.03:  # 3cm 阈值更严格
+            if pos_err < 0.03:
                 self.goal_reached = True
                 reward_components['success_bonus'] = 20.0  # 接触成功的高奖励
         elif pos_err < 0.05:  # 如果没有接触但距离很近，也给予一定奖励
@@ -375,7 +377,7 @@ class PiperEnv(gym.Env):
         elif pos_err > 0.2:
             # 如果距离过远，给予负奖励
             reward_components['proximity_bonus'] = -2.0
-        # 存储奖励组件供step函数使用
+        
         self.reward_components = reward_components
         
         # 计算总奖励
