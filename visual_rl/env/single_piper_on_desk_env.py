@@ -88,33 +88,6 @@ class PiperEnv(gym.Env):
         self.context = mujoco.MjrContext(self.model, mujoco.mjtFontScale.mjFONTSCALE_150) # MuJoCo 渲染上下文，用于实际绘图操作
         mujoco.mjr_setBuffer(mujoco.mjtFramebuffer.mjFB_OFFSCREEN, self.context) # 设置渲染缓冲区为离线渲染模式(不显示到屏幕)
     
-    # # set random goal position for cartesian space
-    # def _label_goal_pose(self, position, quat_wxyz):
-    #     """
-    #     设置目标位姿(位置 + 姿态)
-    #     Args:
-    #         position: 目标的位置，(x, y, z)，类型为 numpy.ndarray 或 list
-    #         quat_wxyz: 目标的姿态，四元数 (w, x, y, z)，类型为 numpy.ndarray 或 list
-    #     """
-    #     ## ====== 设置 target 的位姿 ======
-    #     goal_body_name = "target"
-    #     goal_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, goal_body_name) # 使用 MuJoCo 的 mj_name2id() 函数根据名称查找 body 的 ID
-
-    #     if goal_body_id == -1:
-    #         raise ValueError(f"Body named '{goal_body_name}' not found in the model.")
-
-    #     # 获取 joint ID 和 qpos 起始索引
-    #     goal_joint_id = self.model.body_jntadr[goal_body_id] # 获取 body 对应的关节索引
-    #     goal_qposadr = self.model.jnt_qposadr[goal_joint_id] # 获取该关节在 qpos 向量中的起始索引
-
-    #     # 设置位姿，将传入的 position 和 quat_wxyz 写入到对应的 qpos 区域中，每个自由度为 7 的关节占用 7 个连续的 qpos 元素
-    #     if goal_qposadr + 7 <= self.model.nq:
-    #         self.data.qpos[goal_qposadr     : goal_qposadr + 3] = position
-    #         self.data.qpos[goal_qposadr + 3 : goal_qposadr + 7] = quat_wxyz
-    #     else:
-    #         print("[警告] target 的 qpos 索引越界或 joint 设置有误")
-
-    # 从模型中提取某个 site 的位置和姿态，在 MuJoCo 中，site 是一种虚拟标记点，可以附加在 body 上，常用于表示末端执行器、参考坐标系等
     def _get_site_pos_ori(self, site_name: str) -> tuple[np.ndarray, np.ndarray]:
         site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, site_name)
         if site_id == -1:
@@ -204,19 +177,41 @@ class PiperEnv(gym.Env):
 
         return obs, {}
     
-    def _reset_object_pose(self):
- 
-        apple_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'apple')
-        
-        # 获取苹果对应的关节信息
-        apple_joint_id = self.model.body_jntadr[apple_id]
-        apple_qposadr = self.model.jnt_qposadr[apple_joint_id]
-        
-        # 定义苹果的初始位置范围 (在桌面上的合理范围)
-        base_pos = np.array([0.02, 0.27, 0.768])  # 初始位置
+    def set_goal_pose(self, goal_body_name, position, quat_wxyz):
+        # 设置 target 的位姿
+        # goal_body_name = "target"
+        goal_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, goal_body_name)
 
-        self.data.qpos[apple_qposadr:apple_qposadr + 3] = base_pos # 设置苹果的初始位置
-        self.data.qpos[apple_qposadr + 3:apple_qposadr + 7] = [0, 0, 0, 0]
+        if goal_body_id == -1:
+            raise ValueError(f"Body named '{goal_body_name}' not found in the model.")
+
+        # 获取 joint ID 和 qpos 起始索引
+        goal_joint_id = self.model.body_jntadr[goal_body_id]
+        goal_qposadr = self.model.jnt_qposadr[goal_joint_id]
+
+        # 设置位姿
+        if goal_qposadr + 7 <= self.model.nq:
+            self.data.qpos[goal_qposadr: goal_qposadr + 3] = position
+            self.data.qpos[goal_qposadr + 3: goal_qposadr + 7] = quat_wxyz
+        else:
+            print("[警告] target 的 qpos 索引越界或 joint 设置有误")
+    
+    def _reset_object_pose(self):
+        # 根据最大工作半径，计算初始化目标x,y
+        item_name = "apple"
+        self.target_position, item_quat = self._get_body_pose(item_name)
+        # ----------------------------随机目标位置----------------------------
+        center_x = -0.25
+        center_y = 0
+        radius = np.sqrt(0.28745)
+        theta = np.random.uniform(-np.pi / 2, np.pi / 2)
+        rho = radius * np.random.uniform(0.3, 1)
+        x_world_target = rho * np.cos(theta) + center_x
+        y_world_target = rho * np.sin(theta) + center_y
+
+        self.target_position[0] = x_world_target
+        self.target_position[1] = y_world_target
+        self.set_goal_pose("apple", self.target_position, item_quat)
 
     # 从 MuJoCo 中的某个指定名称的相机(camera)渲染图像，并返回一个 NumPy 数组形式的 OpenCV 图像(BGR 格式)
     def _get_image_from_camera(self, w, h, camera_name):
@@ -330,7 +325,7 @@ class PiperEnv(gym.Env):
     def _compute_pos_error_and_reward(self, cur_pos, goal_pos):
         # 计算位置误差(欧氏距离)
         pos_error = np.linalg.norm(cur_pos - goal_pos) # 计算当前末端执行器位置与目标位置之间的欧氏距离误差
-        pos_reward = -2 * pos_error + 0.8
+        pos_reward = -np.arctan(pos_error)
         return pos_reward, pos_error
     
 
