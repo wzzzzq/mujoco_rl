@@ -78,7 +78,7 @@ class PiperEnv(gym.Env):
         # self.goal_angle = None
         # self._set_goal_pose()
 
-        self.episode_len = 100 # 每个 episode 的最大步数
+        self.episode_len = 300 # 每个 episode 的最大步数
         self.init_qpos = np.zeros(8) + 0.01 # 初始关节位置
         self.init_qvel = np.zeros(8) + 0.01 # 初始关节速度
 
@@ -536,7 +536,7 @@ if __name__ == "__main__":
         env,
         policy_kwargs=policy_kwargs,
         verbose=1,
-        n_steps=64,
+        n_steps=128,
         batch_size=64,
         n_epochs=10,
         gamma=0.99,
