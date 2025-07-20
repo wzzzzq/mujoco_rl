@@ -79,7 +79,7 @@ if __name__ == "__main__":
                     
                 observation, _ = env.reset()
 
-            time.sleep(1)  # Slower for better visualization
+            time.sleep(0.1)  # Slower for better visualization
     except KeyboardInterrupt:
         print("\nStopping simulation...")
     finally:

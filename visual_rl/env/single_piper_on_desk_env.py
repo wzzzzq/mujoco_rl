@@ -19,6 +19,13 @@ import glfw
 warnings.filterwarnings("ignore", category=UserWarning, module="stable_baselines3.common.on_policy_algorithm") # 忽略 stable_baselines3 中某些无害的警告，避免输出干扰
 
 class PiperEnv(gym.Env):
+    """
+    Piper robot arm environment for apple grasping task using delta (incremental) actions.
+    
+    The neural network outputs delta joint angles [δq1, δq2, δq3, δq4, δq5, δq6, δq7] 
+    representing incremental changes to joint positions rather than absolute positions.
+    This approach provides smoother control and better learning stability.
+    """
     def __init__(self, render=False):
         super(PiperEnv, self).__init__()
         script_dir = os.path.dirname(os.path.realpath(__file__
@@ -49,11 +56,10 @@ class PiperEnv(gym.Env):
             (0, 0.035),
         ])
 
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(7,)) # 动作空间
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(7,)) # 动作空间: 每个关节的角度增量 [-1,1]
         self.observation_space = spaces.Dict({
-            "wrist": spaces.Box(low=0, high=255, shape=(3, 480, 640), dtype=np.uint8),
             "3rd": spaces.Box(low=0, high=255, shape=(3, 480, 640), dtype=np.uint8) 
-        }) # 观测空间，包含腕部相机和第三视角相机
+        }) 
         self.np_random = None # 用于生成随机数，将在 reset(seed=...) 中初始化
         self.step_number = 0 # 记录当前 episode 的步数
 
@@ -72,7 +78,7 @@ class PiperEnv(gym.Env):
         # self.goal_angle = None
         # self._set_goal_pose()
 
-        self.episode_len = 200 # 每个 episode 的最大步数
+        self.episode_len = 100 # 每个 episode 的最大步数
         self.init_qpos = np.zeros(8) + 0.01 # 初始关节位置
         self.init_qvel = np.zeros(8) + 0.01 # 初始关节速度
 
@@ -121,22 +127,51 @@ class PiperEnv(gym.Env):
         
         return position, quaternion
 
-    # 将强化学习 agent 输出的动作值 action 从 [-1, 1] 范围映射到实际的关节角度范围
-    def map_action_to_joint_limits(self, action: np.ndarray) -> np.ndarray:
+    # 将强化学习 agent 输出的动作值 action 从 [-1, 1] 范围映射到关节角度增量
+    def map_action_to_joint_deltas(self, action: np.ndarray) -> np.ndarray:
         """
-        将 [-1, 1] 范围内的 action 映射到每个关节的具体角度范围。
+        将 [-1, 1] 范围内的 action 映射到关节角度增量 (delta angles)。
         Args:
-            action (np.ndarray): 形状为 (7,) 的数组，值范围在 [-1, 1]
+            action (np.ndarray): 形状为 (7,) 的数组，值范围在 [-1, 1]，表示各关节的增量方向和大小
         Returns:
-            np.ndarray: 形状为 (7,) 的数组，映射到实际关节角度范围，类型为 numpy.ndarray
+            np.ndarray: 形状为 (7,) 的数组，映射到实际关节角度增量，类型为 numpy.ndarray
         """
-        normalized = (action + 1) / 2 # 将 action 从 [-1, 1] 映射到 [0, 1]，便于线性插值
-        # 从 self.joint_limits 获取每个关节的角度下限和上限
+        # 定义每个关节的最大增量步长 (弧度)
+        max_delta_per_step = np.array([
+            0.1,   # joint 1: ±0.1 rad per step (~5.7 degrees)
+            0.1,   # joint 2: ±0.1 rad per step
+            0.1,   # joint 3: ±0.1 rad per step  
+            0.1,   # joint 4: ±0.1 rad per step
+            0.1,   # joint 5: ±0.1 rad per step
+            0.1,   # joint 6: ±0.1 rad per step
+            0.2,   # gripper: ±0.2 units per step
+        ])
+        
+        # action 范围 [-1, 1] 直接映射到增量范围 [-max_delta, +max_delta]
+        delta_action = action * max_delta_per_step
+        
+        return delta_action
+    
+    def apply_joint_deltas_with_limits(self, current_qpos: np.ndarray, delta_action: np.ndarray) -> np.ndarray:
+        """
+        将增量动作应用到当前关节位置，同时确保不超出关节限制
+        Args:
+            current_qpos: 当前关节位置 (7,)
+            delta_action: 关节位置增量 (7,)
+        Returns:
+            np.ndarray: 应用增量后的新关节位置，限制在关节范围内
+        """
+        # 计算新的关节位置
+        new_qpos = current_qpos + delta_action
+        
+        # 获取关节限制
         lower_bounds = self.joint_limits[:, 0]
         upper_bounds = self.joint_limits[:, 1]
-        mapped_action = lower_bounds + normalized * (upper_bounds - lower_bounds) # 线性插值得到实际的关节角度值
-
-        return mapped_action
+        
+        # 将新位置限制在关节范围内
+        new_qpos = np.clip(new_qpos, lower_bounds, upper_bounds)
+        
+        return new_qpos
     
     # 设置 MuJoCo 模型的状态(位置 qpos 和速度 qvel)，并推进一步仿真
     def _set_state(self, qpos, qvel):
@@ -163,12 +198,10 @@ class PiperEnv(gym.Env):
         )
         
         self._set_state(qpos, qvel) # 设置模型状态并前进一步仿真使其生效
-        # self._set_goal_pose()
 
         ## TODO step 2 : 把交互的物品重新放置位置
         self._reset_object_pose()
         
-        # 加入扰动，使得在每次 reset 时将物体放在略微不同的位置，提高训练鲁棒性
         obs = self._get_observation() # 获取初始观测值
 
         ## TODO 以下两个保持不动
@@ -211,6 +244,8 @@ class PiperEnv(gym.Env):
 
         self.target_position[0] = x_world_target
         self.target_position[1] = y_world_target
+        self.target_position[2] = 0.768  # Set apple on the table surface
+        
         self.set_goal_pose("apple", self.target_position, item_quat)
 
     # 从 MuJoCo 中的某个指定名称的相机(camera)渲染图像，并返回一个 NumPy 数组形式的 OpenCV 图像(BGR 格式)
@@ -236,7 +271,6 @@ class PiperEnv(gym.Env):
         wrist_cam_image = np.transpose(wrist_cam_image, (2, 0, 1)) # 新形状: (3, 480, 640)
         top_cam_image = np.transpose(top_cam_image, (2, 0, 1)) # 新形状: (3, 480, 640)
         obs = {
-            "wrist": wrist_cam_image,
             "3rd": top_cam_image
         }
         return obs
@@ -319,94 +353,142 @@ class PiperEnv(gym.Env):
             if link_contact:
                 # 如果任一部分接触，记录接触信息
                 contact_found = True
-                print(f"夹爪与桌面接触: {link_name} 接触力 {link_force}")
+                # print(f"夹爪与桌面接触: {link_name} 接触力 {link_force}")
                 total_force += link_force
 
         return contact_found, total_force
 
-    def _compute_pos_error_and_reward(self, cur_pos, goal_pos):
-        # 计算位置误差(欧氏距离)
-        pos_error = np.linalg.norm(cur_pos - goal_pos) # 计算当前末端执行器位置与目标位置之间的欧氏距离误差
-        pos_reward = -np.arctan(pos_error)
-        return pos_reward, pos_error
-    
-
-    def _compute_reward(self, observation):
-        # 获取当前末端执行器位姿
-        end_ee_position, _ = self._get_site_pos_ori("end_ee")
-        # 获取目标物体位姿
+    def _check_apple_fell_off_table(self) -> bool:
+        """
+        检查苹果是否从桌子上掉落
+        Returns:
+            bool: 是否掉落
+        """
         apple_position, _ = self._get_body_pose('apple')
-        # 末端执行器位姿和目标物体位姿的差异作为奖励
-        base_reward, pos_err = self._compute_pos_error_and_reward(end_ee_position, apple_position)
+        x, y, z = apple_position
         
-        # 初始化奖励组件
-        reward_components = {
-            'base_reward': base_reward,
-            'table_penalty': 0.0,
-            'contact_reward': 0.0,
-            'success_bonus': 0.0,
-            'proximity_bonus': 0.0,
-            'position_error': pos_err
+        # 桌子的边界 (从 scene.xml 获取: pos="0 0 0.73", size="0.3 0.6 0.01115")
+        table_x_min, table_x_max = -0.3, 0.3
+        table_y_min, table_y_max = -0.6, 0.6
+        table_surface_height = 0.74115  # 0.73 + 0.01115
+        
+        # 检查是否在桌面 x,y 范围内
+        if x < table_x_min or x > table_x_max:
+            return True
+
+        if y < table_y_min or y > table_y_max:
+            return True
+
+        # 检查是否掉到桌面以下 (给一些容错空间，如果苹果低于桌面5cm则认为掉落)
+        if z < table_surface_height - 0.05:
+            return True
+
+        return False
+
+    def _compute_distance_to_rest_qpos(self):
+        """计算当前关节角度与初始休息位置的距离"""
+        current_qpos = self.data.qpos[:7]
+        rest_qpos = self.init_qpos[:7]  # 使用初始化位置作为休息位置
+        return np.linalg.norm(current_qpos - rest_qpos)
+
+    def _compute_reward(self):
+        # Stage 1: Reward for reaching and grasping the apple
+        # Stage 2: If grasping, reward for returning to rest pose  
+        # Penalty for touching the table throughout
+        
+        # 获取当前末端执行器位姿和目标物体位姿
+        end_ee_position, _ = self._get_site_pos_ori("end_ee")
+        apple_position, _ = self._get_body_pose('apple')
+        
+        # 计算TCP到目标物体的距离
+        tcp_to_obj_dist = np.linalg.norm(end_ee_position - apple_position)
+        
+        # Stage 1: 接近奖励 - 使用tanh函数提供平滑的距离奖励
+        reaching_reward = 1 - np.tanh(5 * tcp_to_obj_dist)
+        
+        # 检查是否抓取到物体
+        apple_contact, apple_force = self._check_gripper_contact_with_object('apple')
+        is_grasped = 1.0 if apple_contact and apple_force > 0.5 else 0.0  # 需要一定的接触力才算抓取
+        
+        # 基础奖励: 接近奖励 + 抓取奖励
+        reward = reaching_reward + is_grasped
+        
+        # Stage 2: 如果已抓取，奖励返回休息位置
+        if is_grasped > 0:
+            distance_to_rest = self._compute_distance_to_rest_qpos()
+            place_reward = np.exp(-2 * distance_to_rest)
+            reward += place_reward * is_grasped
+            
+            # 如果抓取且距离很近，认为任务成功
+            if tcp_to_obj_dist < 0.03:
+                self.goal_reached = True
+        
+        # 惩罚接触桌面
+        table_contact, table_force = self._check_gripper_contact_with_table()
+        touching_table = 1.0 if table_contact else 0.0
+        reward -= 2 * touching_table
+        
+        # 保存奖励组件用于调试和分析
+        self.reward_components = {
+            'reaching_reward': reaching_reward,
+            'is_grasped': is_grasped,
+            'place_reward': place_reward * is_grasped if is_grasped > 0 else 0.0,
+            'table_penalty': -2 * touching_table,
+            'tcp_to_obj_dist': tcp_to_obj_dist,
+            'distance_to_rest': self._compute_distance_to_rest_qpos() if is_grasped > 0 else 0.0,
+            'total_reward': reward
         }
         
-        # 检查夹爪与桌面的接触 - 惩罚接触桌面
-        table_contact, table_force = self._check_gripper_contact_with_table()
-        if table_contact:
-            # 惩罚与桌面接触，力越大惩罚越重
-            table_penalty = -2*min(table_force / 10.0, 2.0)  # 负惩罚，限制最大惩罚为 -2.0
-            reward_components['table_penalty'] = table_penalty
-            
-        apple_contact, apple_force = self._check_gripper_contact_with_object('apple')
-        if apple_contact:
-            reward_components['contact_reward'] = 10
-            
-            # 如果有接触且距离很近，可以考虑成功
-            if pos_err < 0.03:
-                self.goal_reached = True
-                reward_components['success_bonus'] = 20.0  # 接触成功的高奖励
-        elif pos_err < 0.1:  # 如果没有接触但距离很近，也给予一定奖励
-            reward_components['proximity_bonus'] = 5.0
-        elif pos_err > 0.4:
-            # 如果距离过远，给予负奖励
-            reward_components['proximity_bonus'] = -2.0
-        
-        self.reward_components = reward_components
-        
-        # 计算总奖励
-        total_reward = sum(reward_components.values()) - reward_components['position_error']  # position_error不计入总和
-        return total_reward
+        return reward
         
 
     # 接收一个动作 action，执行一步环境逻辑，并返回观测值、奖励、终止信号等信息
     def step(self, action):
-        mapped_action = self.map_action_to_joint_limits(action) # 将 action 映射回真实机械臂关节空间
-        # TODO: Use delta or action?
-        self.data.ctrl[:7] = mapped_action[:7] # 动作
-        # self._label_goal_pose(self.goal_pos, self.goal_quat)
-        # TODO: One sample should last longer
-        for i in range(100):
+        # 将 action 映射为关节角度增量
+        delta_action = self.map_action_to_joint_deltas(action)
+        
+        # 获取当前关节位置
+        current_qpos = self.data.qpos[:7].copy()
+        
+        # 应用增量并确保在关节限制内
+        new_qpos = self.apply_joint_deltas_with_limits(current_qpos, delta_action)
+        
+        # 设置新的关节目标位置
+        self.data.ctrl[:7] = new_qpos
+        
+        for _ in range(200):
             mujoco.mj_step(self.model, self.data) # mujoco 仿真向前推进一步，此处会做动力学积分，更新所有物理状态(位置、速度、接触力等)
+            if self.handle is not None:
+                self.handle.sync()
+            
+            current_qpos = self.data.qpos[:7].copy() # 更新当前关节位置
+            pos_err = np.linalg.norm(new_qpos - current_qpos) # 计算新旧关节位置的误差
+            # print(f"Step {_+1}: Position error = {pos_err:.4f}") # 打印每一步的误差
+            if pos_err < 0.08:
+                 break
 
         self.step_number += 1 # 更新步数计数器
         observation = self._get_observation() # 获取当前状态观测值
 
-        reward = self._compute_reward(observation) # 计算 reward
-        done = self.goal_reached
-        
+        reward = self._compute_reward() # 计算 reward
+
+        apple_fell = self._check_apple_fell_off_table()
+        done = self.goal_reached or apple_fell # 任务完成或苹果掉落则结束当前 episode
+
         # 创建详细的info字典，包含奖励组件信息
         info = {
             'is_success': done,
             'reward_components': self.reward_components.copy() if hasattr(self, 'reward_components') else {},
             'total_reward': reward,
             'step_number': self.step_number,
-            'goal_reached': self.goal_reached
+            'goal_reached': self.goal_reached,
+            'current_qpos': current_qpos.copy(),  # 添加当前关节位置信息
+            'delta_action': delta_action.copy(),  # 添加增量动作信息
+            'new_qpos': new_qpos.copy()          # 添加新关节位置信息
         } 
 
         truncated = self.step_number > self.episode_len # 如果当前步数超过了预设的最大步数，则 episode 被截断，通常表示未完成任务但时间到了。
         
-        if self.handle is not None:
-            self.handle.sync()
-
         return observation, reward, done, truncated, info
 
     def seed(self, seed=None):
@@ -448,8 +530,8 @@ if __name__ == "__main__":
         env,
         policy_kwargs=policy_kwargs,
         verbose=1,
-        n_steps=10,
-        batch_size=50,
+        n_steps=64,
+        batch_size=64,
         n_epochs=10,
         gamma=0.99,
         learning_rate=3e-4,
@@ -462,7 +544,7 @@ if __name__ == "__main__":
     total_timesteps          总共与环境交互的步数 (env.step() 的次数总和）   
     progress_bar             是否显示训练进度条
     """
-    model.learn(total_timesteps=200000, progress_bar=True)  # Changed from 20M to 100K steps
+    model.learn(total_timesteps=50000000, progress_bar=True)
     model.save("piper_ik_ppo_model")
 
     print(" model sava success ! ")
