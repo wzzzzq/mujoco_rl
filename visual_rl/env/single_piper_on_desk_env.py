@@ -230,17 +230,24 @@ class PiperEnv(gym.Env):
             print("[警告] target 的 qpos 索引越界或 joint 设置有误")
     
     def _reset_object_pose(self):
-        # 根据最大工作半径，计算初始化目标x,y
+        # 将苹果随机放置在桌子中心的圆形区域内，确保相机始终可见
         item_name = "apple"
         self.target_position, item_quat = self._get_body_pose(item_name)
+        
         # ----------------------------随机目标位置----------------------------
-        center_x = -0.25
-        center_y = 0
-        radius = np.sqrt(0.28745)
-        theta = np.random.uniform(-np.pi / 2, np.pi / 2)
-        rho = radius * np.random.uniform(0.3, 1)
-        x_world_target = rho * np.cos(theta) + center_x
-        y_world_target = rho * np.sin(theta) + center_y
+        # 桌子中心位置 (基于 scene.xml 中桌子的 pos="0 0 0.73")
+        desk_center_x = 0.0
+        desk_center_y = 0.0
+        
+        # 在桌面中心的圆形区域内随机放置，半径设为桌子宽度的一半以确保在桌面范围内
+        max_radius = 0.1
+        
+        # 使用极坐标生成随机位置
+        theta = np.random.uniform(0, 2 * np.pi)  # 完整圆形范围
+        rho = max_radius * np.sqrt(np.random.uniform(0, 1))  # 均匀分布在圆内
+        
+        x_world_target = rho * np.cos(theta) + desk_center_x
+        y_world_target = rho * np.sin(theta) + desk_center_y
 
         self.target_position[0] = x_world_target
         self.target_position[1] = y_world_target
@@ -417,10 +424,9 @@ class PiperEnv(gym.Env):
         if is_grasped > 0:
             distance_to_rest = self._compute_distance_to_rest_qpos()
             place_reward = np.exp(-2 * distance_to_rest)
-            reward += place_reward * is_grasped
+            reward += place_reward
             
-            # 如果抓取且距离很近，认为任务成功
-            if tcp_to_obj_dist < 0.03:
+            if tcp_to_obj_dist < 0.03 and distance_to_rest < 0.2:
                 self.goal_reached = True
         
         # 惩罚接触桌面
